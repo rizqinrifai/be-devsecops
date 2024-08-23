@@ -4,22 +4,74 @@ pipeline {
     }
 
     environment {
-        SONARQUBE_SERVER = 'sonar-scanner-jenkins'
-        SONARQUBE_SCANNER = 'sonar-scanner-jenkins'
+        SONARQUBE_SERVER = 'sonar'
+        SONARQUBE_SCANNER = 'sonar-scanner'
         SONAR_HOST_URL = 'https://sonar.teamdev.id/'
-        SONAR_AUTH_TOKEN = credentials('token-sonarqube')
-        DOCKER_HUB_CREDENTIALS = credentials('docker-login-rizqi')
-        DOCKER_IMAGE = 'rnrifai/rnrifai-page:latest'
+        SONAR_AUTH_TOKEN = credentials('sonardev')
+        VAULT_ADDR = 'https://vault.teamdev.id/'
+        VAULT_SECRET = vault path: 'secret/sonar', key: 'sonar-dev'
         ZAP_DOCKER_IMAGE = 'ghcr.io/zaproxy/zaproxy:stable'
     }
 
+    parameters {
+        choice(name: 'BUILD_TYPE', choices: ['Scan', 'Release', 'Restart'], description: 'Select the type of build to run')
+        string(name: 'BRANCH_NAME', defaultValue: '', description: 'Branch name for Scan build')
+        string(name: 'TAG_NAME', defaultValue: '', description: 'Tag name for Release build')
+    }
+
     stages {
-        stage('Clone') {
+        stage('Determine Build Type') {
             steps {
-                sh 'git clone https://github.com/rifai-rizqi3/rnrifai.git'
+                script {
+                    echo "Build Type: ${params.BUILD_TYPE}"
+                    echo "Branch Name: ${params.BRANCH_NAME}"
+                    echo "Tag Name: ${params.TAG_NAME}"
+
+                    switch(params.BUILD_TYPE) {
+                        case 'Scan':
+                            if (params.BRANCH_NAME == '') {
+                                error "Branch name is required for Scan build"
+                            }
+                            env.GIT_BRANCH = params.BRANCH_NAME
+                            break
+                        case 'Release':
+                            if (params.TAG_NAME == '') {
+                                error "Tag name is required for Release build"
+                            }
+                            env.GIT_TAG = params.TAG_NAME
+                            break
+                        case 'Restart':
+                            echo "Preparing for restart"
+                            break
+                        default:
+                            error "Invalid build type selected"
+                    }
+                }
             }
         }
+
+        stage('Clone') {
+            when {
+                expression { params.BUILD_TYPE != 'Restart' }
+            }
+            steps {
+                script {
+                    if (params.BUILD_TYPE == 'Scan') {
+                        sh "git clone -b ${env.GIT_BRANCH} https://github.com/rizqinrifai/be-devsecops.git"
+                    } else if (params.BUILD_TYPE == 'Release') {
+                        sh "git clone https://github.com/rizqinrifai/be-devsecops.git"
+                        dir('be-devsecops') {
+                            sh "git checkout ${env.GIT_TAG}"
+                        }
+                    }
+                }
+            }
+        }
+
         stage('[SCA] Trivy Scan') {
+            when {
+                expression { params.BUILD_TYPE != 'Restart' }
+            }
             steps {
                 script {
                     echo 'Scanning for vulnerabilities using Trivy...'
@@ -28,77 +80,51 @@ pipeline {
                 archiveArtifacts artifacts: 'trivy.json'
             }
         }
+
         stage('[SAST] SonarQube') {
+            when {
+                expression { params.BUILD_TYPE != 'Restart' }
+            }
             steps {
                 script {
                     def scannerHome = tool name: env.SONARQUBE_SCANNER, type: 'hudson.plugins.sonar.SonarRunnerInstallation'
                     withSonarQubeEnv(env.SONARQUBE_SERVER) {
                         sh "${scannerHome}/bin/sonar-scanner \
-                            -Dsonar.projectKey=rnifai-page \
+                            -Dsonar.projectKey=be-devsecops \
                             -Dsonar.sources=. \
                             -Dsonar.host.url=${SONAR_HOST_URL} \
-                            -Dsonar.login=${SONAR_AUTH_TOKEN}"
+                            -Dsonar.login=${env.VAULT_SECRET}"
                     }
                 }
             }
         }
+
         stage('Deploy') {
+            when {
+                expression { params.BUILD_TYPE == 'Release' }
+            }
             steps {
                 sh 'docker-compose up -d'
             }
         }
-        // stage('[DAST] OWASP ZAP') {
-        //     steps {
-        //         catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-        //             script {
-        //                 echo 'Running OWASP ZAP scan...'
-        //                 sh 'docker pull ghcr.io/zaproxy/zaproxy:stable'
-        //                 sh '''
-        //                     docker run --rm -t \
-        //                         -v ${WORKSPACE}/zap-reports:/zap/wrk \
-        //                         ghcr.io/zaproxy/zaproxy:stable \
-        //                         zap-full-scan.py -t http://139.162.18.93:3007 -r /zap/wrk/zap-report.html
-        //                 '''
-        //             }
-        //             sh 'cp /zap/wrk/zap-report.html ./zap-report.html'
-        //             archiveArtifacts artifacts: 'zap-report.html'
-        //         }
-        //     }
-        // }
-        // stage('[DAST] OWASP ZAP') {
-        //     steps {
-        //         catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-        //             script {
-        //                 echo 'Running OWASP ZAP scan...'
-        //                 sh 'docker pull ghcr.io/zaproxy/zaproxy:stable'
-        //                 sh '''
-        //                     docker run --rm -t \
-        //                         -v ${WORKSPACE}/zap-reports:/zap/wrk \
-        //                         ghcr.io/zaproxy/zaproxy:stable \
-        //                         zap-full-scan.py -t http://139.162.18.93:3007 -r /zap/wrk/zap-report.html
-        //                 '''
-        //             }
-        //             sh 'cp ${WORKSPACE}/zap-reports/zap-report.html ./zap-report.html'
-        //             archiveArtifacts artifacts: 'zap-report.html'
-        //         }
-        //     }
-        // }
 
         stage('[DAST] OWASP ZAP') {
+            when {
+                expression { params.BUILD_TYPE == 'Release' }
+            }
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     script {
                         echo 'Running OWASP ZAP scan...'
-                        sh 'docker --version'  // Check Docker version to ensure Docker is running
-                        sh 'mkdir -p ${WORKSPACE}/zap-reports'  // Ensure the directory exists
+                        sh 'docker --version'
+                        sh 'mkdir -p ${WORKSPACE}/zap-reports'
                         sh 'docker pull ghcr.io/zaproxy/zaproxy:stable'
                         sh '''
                             docker run --user $(id -u) \
                                 -v ${WORKSPACE}/zap-reports:/zap/wrk \
                                 ghcr.io/zaproxy/zaproxy:stable \
-                                zap-full-scan.py -t http://139.162.18.93:3007 -r /zap/wrk/zap-report.html
+                                zap-full-scan.py -t http://139.162.18.93:3003 -r /zap/wrk/zap-report.html
                         '''
-                        // Check if the report was generated
                         sh 'test -f ${WORKSPACE}/zap-reports/zap-report.html'
                     }
                     sh 'cp ${WORKSPACE}/zap-reports/zap-report.html ./zap-report.html'
@@ -108,13 +134,16 @@ pipeline {
         }
 
         stage('[DAST] Dastardly') {
+            when {
+                expression { params.BUILD_TYPE == 'Release' }
+            }
             steps {
                 catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
                     script {
                         sh 'docker pull public.ecr.aws/portswigger/dastardly:latest'
                         sh '''
                         docker run --user $(id -u) -v ${WORKSPACE}:${WORKSPACE}:rw \
-                        -e BURP_START_URL=http://139.162.18.93:3007 \
+                        -e BURP_START_URL=http://139.162.18.93:3003 \
                         -e BURP_REPORT_FILE_PATH=${WORKSPACE}/dastardly-report.xml \
                         public.ecr.aws/portswigger/dastardly:latest
                         '''
@@ -124,7 +153,18 @@ pipeline {
             }
         }
 
-
+        stage('Restart Services') {
+            when {
+                expression { params.BUILD_TYPE == 'Restart' }
+            }
+            steps {
+                script {
+                    echo 'Restarting services...'
+                    sh 'docker-compose down'
+                    sh 'docker-compose up -d'
+                }
+            }
+        }
     }
 
     post {

@@ -10,6 +10,10 @@ let users = [
   { id: 2, username: 'user', password: 'user123' }
 ];
 
+app.get('/', (req, res) => {
+  res.send('<h1>DEVSECOPSE PROJECT TESTING</h1>');
+});
+
 // Endpoint login yang rentan terhadap SQL Injection
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
