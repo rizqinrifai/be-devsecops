@@ -7,7 +7,7 @@ pipeline {
         SONARQUBE_SERVER = 'sonar'
         SONARQUBE_SCANNER = 'sonar-scanner'
         SONAR_HOST_URL = 'https://sonar.teamdev.id/'
-        SONAR_AUTH_TOKEN = credentials('sonardev')
+//         SONAR_AUTH_TOKEN = credentials('sonardev')
         VAULT_ADDR = 'https://vault.teamdev.id/'
         VAULT_SECRET = vault path: 'secret/sonar', key: 'sonar-dev'
         ZAP_DOCKER_IMAGE = 'ghcr.io/zaproxy/zaproxy:stable'
